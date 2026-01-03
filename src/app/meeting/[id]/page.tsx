@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
@@ -10,15 +10,32 @@ import {
     Square,
     Users,
     UserPlus,
-    RefreshCw
+    RefreshCw,
+    Mic,
+    Edit3
 } from 'lucide-react';
 import Link from 'next/link';
 import { Button, Input, Chip, ChipGroup, Modal, Card, CardContent } from '@/components/ui';
 import { Timer, TranscriptArea, TempLinkSection } from '@/components/meeting';
 import { useMeetingStore } from '@/stores/meeting-store';
 import { Person, TranscriptSegment } from '@/types';
-import { startTranscription, stopTranscription } from '@/lib/transcription';
+import {
+    startTranscription,
+    stopTranscription,
+    startAssemblyAITranscription,
+    stopAssemblyAITranscription,
+    setSpeakerName,
+    isAssemblyAIAvailable
+} from '@/lib/transcription';
 import { mockPeople } from '@/lib/storage/mock-data';
+
+// Speaker detected by AssemblyAI
+interface DetectedSpeaker {
+    id: string;
+    defaultName: string;
+    customName: string;
+    segmentCount: number;
+}
 
 export default function MeetingPage() {
     const router = useRouter();
@@ -36,7 +53,6 @@ export default function MeetingPage() {
         pauseRecording,
         resumeRecording,
         stopRecording,
-        setCurrentSpeaker,
         switchSpeaker,
         addPerson,
         addParticipantToMeeting,
@@ -47,9 +63,15 @@ export default function MeetingPage() {
     const [title, setTitle] = useState('');
     const [showSpeakerModal, setShowSpeakerModal] = useState(false);
     const [showAddParticipant, setShowAddParticipant] = useState(false);
+    const [showSpeakerManagerModal, setShowSpeakerManagerModal] = useState(false);
     const [newParticipantName, setNewParticipantName] = useState('');
     const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
     const [interimText, setInterimText] = useState('');
+    const [usingAssemblyAI, setUsingAssemblyAI] = useState(false);
+    const [detectedSpeakers, setDetectedSpeakers] = useState<DetectedSpeaker[]>([]);
+    const [activeSpeakerName, setActiveSpeakerName] = useState<string>('');
+    const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
+    const [editingSpeakerName, setEditingSpeakerName] = useState('');
 
     // Load meeting data
     useEffect(() => {
@@ -60,8 +82,46 @@ export default function MeetingPage() {
         }
     }, [meetingId, getMeetingById]);
 
-    // Setup transcription callback
-    const handleTranscriptSegment = useCallback((segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => {
+    // Track detected speakers from transcript
+    const updateDetectedSpeaker = useCallback((speakerId: string, speakerName: string) => {
+        setDetectedSpeakers(prev => {
+            const existing = prev.find(s => s.id === speakerId);
+            if (existing) {
+                return prev.map(s =>
+                    s.id === speakerId
+                        ? { ...s, segmentCount: s.segmentCount + 1 }
+                        : s
+                );
+            }
+            return [...prev, {
+                id: speakerId,
+                defaultName: speakerName,
+                customName: speakerName,
+                segmentCount: 1
+            }];
+        });
+        setActiveSpeakerName(speakerName);
+    }, []);
+
+    // Setup transcription callback for AssemblyAI
+    const handleAssemblyAISegment = useCallback((segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => {
+        // Skip system messages from speaker tracking
+        if (segment.speakerId !== 'system') {
+            updateDetectedSpeaker(segment.speakerId, segment.speakerName);
+        }
+
+        const fullSegment: TranscriptSegment = {
+            ...segment,
+            id: Math.random().toString(36).substring(2, 15),
+            createdAt: new Date(),
+        };
+
+        setTranscript((prev) => [...prev, fullSegment]);
+        addTranscriptSegment(segment);
+    }, [addTranscriptSegment, updateDetectedSpeaker]);
+
+    // Setup transcription callback for Web Speech API (fallback)
+    const handleWebSpeechSegment = useCallback((segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => {
         const fullSegment: TranscriptSegment = {
             ...segment,
             id: Math.random().toString(36).substring(2, 15),
@@ -82,17 +142,61 @@ export default function MeetingPage() {
     // Start/stop transcription based on recording state
     useEffect(() => {
         if (isRecording && !isPaused) {
-            startTranscription(handleTranscriptSegment, {
-                language: 'pt-BR',
-                speakerName: currentSpeaker?.name || 'Participante',
-            }, handleInterimResult);
+            // Try AssemblyAI first, fall back to Web Speech
+            const startRecording = async () => {
+                const assemblyAIAvailable = await isAssemblyAIAvailable();
+
+                if (assemblyAIAvailable) {
+                    console.log('[Meeting] Starting AssemblyAI transcription');
+                    const started = await startAssemblyAITranscription(handleAssemblyAISegment, {
+                        language: 'pt-BR',
+                        onSpeakerChange: (speaker) => setActiveSpeakerName(speaker)
+                    });
+
+                    if (started) {
+                        setUsingAssemblyAI(true);
+                        return;
+                    }
+                }
+
+                // Fallback to Web Speech
+                console.log('[Meeting] Using Web Speech API fallback');
+                setUsingAssemblyAI(false);
+                startTranscription(handleWebSpeechSegment, {
+                    language: 'pt-BR',
+                    speakerName: currentSpeaker?.name || 'Participante',
+                }, handleInterimResult);
+            };
+
+            startRecording();
         } else {
-            stopTranscription();
+            if (usingAssemblyAI) {
+                stopAssemblyAITranscription();
+            } else {
+                stopTranscription();
+            }
             setInterimText('');
         }
 
-        return () => stopTranscription();
-    }, [isRecording, isPaused, handleTranscriptSegment, currentSpeaker, handleInterimResult]);
+        return () => {
+            stopAssemblyAITranscription();
+            stopTranscription();
+        };
+    }, [isRecording, isPaused, handleAssemblyAISegment, handleWebSpeechSegment, currentSpeaker, handleInterimResult, usingAssemblyAI]);
+
+    // Handle speaker name update
+    const handleUpdateSpeakerName = (speakerId: string, newName: string) => {
+        setSpeakerName(speakerId, newName);
+        setDetectedSpeakers(prev =>
+            prev.map(s => s.id === speakerId ? { ...s, customName: newName } : s)
+        );
+        // Update transcript with new name
+        setTranscript(prev =>
+            prev.map(seg => seg.speakerId === speakerId ? { ...seg, speakerName: newName } : seg)
+        );
+        setEditingSpeakerId(null);
+        setEditingSpeakerName('');
+    };
 
     // Update meeting title
     const handleTitleChange = (value: string) => {
@@ -177,12 +281,12 @@ export default function MeetingPage() {
                             />
 
                             <div className={`
-                flex items-center gap-2 px-3 py-1.5 rounded-full
-                ${isPaused
+                                flex items-center gap-2 px-3 py-1.5 rounded-full
+                                ${isPaused
                                     ? 'bg-[var(--warning)]/20 text-[var(--warning)]'
                                     : 'bg-[var(--recording)]/20 text-[var(--recording)]'
                                 }
-              `}>
+                            `}>
                                 <motion.div
                                     className={`w-2 h-2 rounded-full ${isPaused ? 'bg-[var(--warning)]' : 'bg-[var(--recording)]'}`}
                                     animate={!isPaused ? { opacity: [1, 0.4, 1] } : {}}
@@ -192,6 +296,14 @@ export default function MeetingPage() {
                                     {isPaused ? 'Pausado' : 'Gravando'}
                                 </span>
                             </div>
+
+                            {/* AssemblyAI Indicator */}
+                            {usingAssemblyAI && (
+                                <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-[var(--success)]/20 text-[var(--success)]">
+                                    <Mic size={14} />
+                                    <span className="text-xs">Diarização</span>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -230,23 +342,39 @@ export default function MeetingPage() {
                     <TranscriptArea
                         segments={transcript}
                         interimText={interimText}
-                        currentSpeakerName={currentSpeaker?.name}
+                        currentSpeakerName={usingAssemblyAI ? activeSpeakerName : currentSpeaker?.name}
                     />
                 </div>
 
                 {/* Sidebar */}
                 <aside className="w-80 p-4 space-y-4 hidden lg:block">
-                    {/* Current Speaker */}
+                    {/* Current Speaker / Active Speaker */}
                     <Card hover={false}>
                         <CardContent>
                             <div className="flex items-center justify-between mb-3">
-                                <span className="text-sm text-[var(--text-muted)]">Falando agora</span>
-                                <Button variant="ghost" size="sm" onClick={() => setShowSpeakerModal(true)}>
-                                    <RefreshCw size={14} />
-                                    Trocar
-                                </Button>
+                                <span className="text-sm text-[var(--text-muted)]">
+                                    {usingAssemblyAI ? 'Falante Detectado' : 'Falando agora'}
+                                </span>
+                                {!usingAssemblyAI && (
+                                    <Button variant="ghost" size="sm" onClick={() => setShowSpeakerModal(true)}>
+                                        <RefreshCw size={14} />
+                                        Trocar
+                                    </Button>
+                                )}
                             </div>
-                            {currentSpeaker ? (
+                            {usingAssemblyAI ? (
+                                <div className="flex items-center gap-3">
+                                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--success)] to-[var(--primary)] flex items-center justify-center">
+                                        <Mic className="text-white" size={20} />
+                                    </div>
+                                    <div>
+                                        <span className="font-medium text-[var(--text)]">
+                                            {activeSpeakerName || 'Aguardando...'}
+                                        </span>
+                                        <p className="text-xs text-[var(--text-muted)]">Detecção automática</p>
+                                    </div>
+                                </div>
+                            ) : currentSpeaker ? (
                                 <div className="flex items-center gap-3">
                                     <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
                                         <span className="text-white font-semibold text-lg">
@@ -261,38 +389,88 @@ export default function MeetingPage() {
                         </CardContent>
                     </Card>
 
-                    {/* Participants List */}
-                    <Card hover={false}>
-                        <CardContent>
-                            <div className="flex items-center gap-2 mb-3">
-                                <Users size={16} className="text-[var(--text-muted)]" />
-                                <span className="text-sm text-[var(--text-muted)]">
-                                    Participantes ({meeting.participants.length})
-                                </span>
-                            </div>
-                            <div className="space-y-2">
-                                {meeting.participants.map((p) => (
-                                    <div
-                                        key={p.id}
-                                        className={`
-                      flex items-center gap-2 p-2 rounded-[var(--radius-sm)]
-                      ${currentSpeaker?.id === p.id ? 'bg-[var(--primary-subtle)]' : ''}
-                    `}
-                                    >
-                                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
-                                            <span className="text-white text-sm">
-                                                {p.name.charAt(0).toUpperCase()}
-                                            </span>
-                                        </div>
-                                        <span className="text-sm text-[var(--text)]">{p.name}</span>
-                                        {currentSpeaker?.id === p.id && (
-                                            <span className="text-xs text-[var(--primary)] ml-auto">Falando</span>
-                                        )}
+                    {/* Detected Speakers (only when using AssemblyAI) */}
+                    {usingAssemblyAI && detectedSpeakers.length > 0 && (
+                        <Card hover={false}>
+                            <CardContent>
+                                <div className="flex items-center justify-between mb-3">
+                                    <div className="flex items-center gap-2">
+                                        <Users size={16} className="text-[var(--text-muted)]" />
+                                        <span className="text-sm text-[var(--text-muted)]">
+                                            Falantes Detectados ({detectedSpeakers.length})
+                                        </span>
                                     </div>
-                                ))}
-                            </div>
-                        </CardContent>
-                    </Card>
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => setShowSpeakerManagerModal(true)}
+                                    >
+                                        <Edit3 size={14} />
+                                        Editar
+                                    </Button>
+                                </div>
+                                <div className="space-y-2">
+                                    {detectedSpeakers.map((speaker) => (
+                                        <div
+                                            key={speaker.id}
+                                            className={`
+                                                flex items-center gap-2 p-2 rounded-[var(--radius-sm)]
+                                                ${activeSpeakerName === speaker.customName ? 'bg-[var(--primary-subtle)]' : ''}
+                                            `}
+                                        >
+                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
+                                                <span className="text-white text-sm">
+                                                    {speaker.customName.charAt(0).toUpperCase()}
+                                                </span>
+                                            </div>
+                                            <div className="flex-1">
+                                                <span className="text-sm text-[var(--text)]">{speaker.customName}</span>
+                                                <p className="text-xs text-[var(--text-muted)]">{speaker.segmentCount} falas</p>
+                                            </div>
+                                            {activeSpeakerName === speaker.customName && (
+                                                <span className="text-xs text-[var(--primary)]">Falando</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </CardContent>
+                        </Card>
+                    )}
+
+                    {/* Participants List (when not using AssemblyAI) */}
+                    {!usingAssemblyAI && (
+                        <Card hover={false}>
+                            <CardContent>
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Users size={16} className="text-[var(--text-muted)]" />
+                                    <span className="text-sm text-[var(--text-muted)]">
+                                        Participantes ({meeting.participants.length})
+                                    </span>
+                                </div>
+                                <div className="space-y-2">
+                                    {meeting.participants.map((p) => (
+                                        <div
+                                            key={p.id}
+                                            className={`
+                                                flex items-center gap-2 p-2 rounded-[var(--radius-sm)]
+                                                ${currentSpeaker?.id === p.id ? 'bg-[var(--primary-subtle)]' : ''}
+                                            `}
+                                        >
+                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
+                                                <span className="text-white text-sm">
+                                                    {p.name.charAt(0).toUpperCase()}
+                                                </span>
+                                            </div>
+                                            <span className="text-sm text-[var(--text)]">{p.name}</span>
+                                            {currentSpeaker?.id === p.id && (
+                                                <span className="text-xs text-[var(--primary)] ml-auto">Falando</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </CardContent>
+                        </Card>
+                    )}
 
                     {/* Temp Link Section */}
                     <TempLinkSection meetingId={meetingId} />
@@ -322,7 +500,7 @@ export default function MeetingPage() {
                 </div>
             </footer>
 
-            {/* Speaker Selection Modal */}
+            {/* Speaker Selection Modal (for Web Speech fallback) */}
             <Modal
                 isOpen={showSpeakerModal}
                 onClose={() => setShowSpeakerModal(false)}
@@ -334,13 +512,13 @@ export default function MeetingPage() {
                             key={person.id}
                             onClick={() => handleSelectSpeaker(person)}
                             className={`
-                w-full flex items-center gap-3 p-3 rounded-[var(--radius-md)]
-                border transition-all
-                ${currentSpeaker?.id === person.id
+                                w-full flex items-center gap-3 p-3 rounded-[var(--radius-md)]
+                                border transition-all
+                                ${currentSpeaker?.id === person.id
                                     ? 'bg-[var(--primary-subtle)] border-[var(--primary)]'
                                     : 'bg-[var(--glass-bg)] border-[var(--glass-border)] hover:border-[var(--glass-border-hover)]'
                                 }
-              `}
+                            `}
                         >
                             <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
                                 <span className="text-white font-medium">
@@ -398,6 +576,92 @@ export default function MeetingPage() {
                             Criar
                         </Button>
                     </div>
+                </div>
+            </Modal>
+
+            {/* Speaker Manager Modal (for renaming detected speakers) */}
+            <Modal
+                isOpen={showSpeakerManagerModal}
+                onClose={() => {
+                    setShowSpeakerManagerModal(false);
+                    setEditingSpeakerId(null);
+                    setEditingSpeakerName('');
+                }}
+                title="Gerenciar Falantes"
+            >
+                <div className="space-y-4">
+                    <p className="text-[var(--text-secondary)]">
+                        Dê nomes aos falantes detectados automaticamente.
+                    </p>
+
+                    <div className="space-y-3">
+                        {detectedSpeakers.map((speaker) => (
+                            <div
+                                key={speaker.id}
+                                className="flex items-center gap-3 p-3 rounded-[var(--radius-md)] bg-[var(--glass-bg)] border border-[var(--glass-border)]"
+                            >
+                                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center">
+                                    <span className="text-white font-medium">
+                                        {speaker.customName.charAt(0).toUpperCase()}
+                                    </span>
+                                </div>
+
+                                {editingSpeakerId === speaker.id ? (
+                                    <div className="flex-1 flex gap-2">
+                                        <Input
+                                            value={editingSpeakerName}
+                                            onChange={setEditingSpeakerName}
+                                            placeholder="Nome do participante"
+                                            className="flex-1"
+                                        />
+                                        <Button
+                                            variant="primary"
+                                            size="sm"
+                                            onClick={() => handleUpdateSpeakerName(speaker.id, editingSpeakerName)}
+                                        >
+                                            Salvar
+                                        </Button>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => {
+                                                setEditingSpeakerId(null);
+                                                setEditingSpeakerName('');
+                                            }}
+                                        >
+                                            Cancelar
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="flex-1">
+                                            <span className="font-medium text-[var(--text)]">{speaker.customName}</span>
+                                            <p className="text-xs text-[var(--text-muted)]">
+                                                {speaker.segmentCount} falas • ID: {speaker.id}
+                                            </p>
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => {
+                                                setEditingSpeakerId(speaker.id);
+                                                setEditingSpeakerName(speaker.customName);
+                                            }}
+                                        >
+                                            <Edit3 size={14} />
+                                            Renomear
+                                        </Button>
+                                    </>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+
+                    {detectedSpeakers.length === 0 && (
+                        <p className="text-center text-[var(--text-muted)] py-4">
+                            Nenhum falante detectado ainda. Comece a falar para que o sistema identifique automaticamente.
+                        </p>
+                    )}
                 </div>
             </Modal>
         </div>
