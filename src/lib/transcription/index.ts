@@ -116,7 +116,8 @@ function getSpeechRecognition(): (new () => SpeechRecognition) | null {
  */
 export function startTranscription(
     onSegment: (segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => void,
-    config?: TranscriptionConfig
+    config?: TranscriptionConfig,
+    onInterimResult?: (text: string) => void
 ): void {
     console.log('[Transcription] Starting with config:', config);
 
@@ -151,35 +152,45 @@ export function startTranscription(
     recognition.lang = config?.language || 'pt-BR';
     recognition.maxAlternatives = 1;
 
-    let interimTranscript = '';
-    let finalTranscriptBuffer = '';
+    let lastFinalText = '';
 
     // Handle results
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-        interimTranscript = '';
+        let interimTranscript = '';
+        let finalTranscript = '';
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
             const result = event.results[i];
             const transcript = result[0].transcript;
 
             if (result.isFinal) {
-                const cleanedText = transcript.trim();
-                if (cleanedText && cleanedText !== finalTranscriptBuffer) {
-                    finalTranscriptBuffer = cleanedText;
-                    onSegment({
-                        speakerId: 'user',
-                        speakerName: config?.speakerName || 'Participante',
-                        text: cleanedText,
-                        timestamp: Date.now(),
-                    });
-                }
+                finalTranscript += transcript;
             } else {
                 interimTranscript += transcript;
             }
         }
 
-        if (interimTranscript) {
-            console.log('[Transcription] Interim:', interimTranscript);
+        // Send interim results in real-time for display
+        if (interimTranscript && onInterimResult) {
+            onInterimResult(interimTranscript);
+        }
+
+        // Send final results as segments
+        if (finalTranscript) {
+            const cleanedText = finalTranscript.trim();
+            if (cleanedText && cleanedText !== lastFinalText) {
+                lastFinalText = cleanedText;
+                // Clear interim display
+                if (onInterimResult) {
+                    onInterimResult('');
+                }
+                onSegment({
+                    speakerId: 'user',
+                    speakerName: config?.speakerName || 'Participante',
+                    text: cleanedText,
+                    timestamp: Date.now(),
+                });
+            }
         }
     };
 

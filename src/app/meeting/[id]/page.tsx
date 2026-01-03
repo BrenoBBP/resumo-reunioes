@@ -49,6 +49,7 @@ export default function MeetingPage() {
     const [showAddParticipant, setShowAddParticipant] = useState(false);
     const [newParticipantName, setNewParticipantName] = useState('');
     const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
+    const [interimText, setInterimText] = useState('');
 
     // Load meeting data
     useEffect(() => {
@@ -73,19 +74,25 @@ export default function MeetingPage() {
         addTranscriptSegment(segment);
     }, [currentSpeaker, addTranscriptSegment]);
 
+    // Handle interim text (real-time display while speaking)
+    const handleInterimResult = useCallback((text: string) => {
+        setInterimText(text);
+    }, []);
+
     // Start/stop transcription based on recording state
     useEffect(() => {
         if (isRecording && !isPaused) {
             startTranscription(handleTranscriptSegment, {
                 language: 'pt-BR',
                 speakerName: currentSpeaker?.name || 'Participante',
-            });
+            }, handleInterimResult);
         } else {
             stopTranscription();
+            setInterimText('');
         }
 
         return () => stopTranscription();
-    }, [isRecording, isPaused, handleTranscriptSegment, currentSpeaker]);
+    }, [isRecording, isPaused, handleTranscriptSegment, currentSpeaker, handleInterimResult]);
 
     // Update meeting title
     const handleTitleChange = (value: string) => {
@@ -220,7 +227,11 @@ export default function MeetingPage() {
             <div className="flex-1 flex max-w-7xl mx-auto w-full">
                 {/* Transcript Area */}
                 <div className="flex-1 flex flex-col border-r border-[var(--glass-border)]">
-                    <TranscriptArea segments={transcript} />
+                    <TranscriptArea
+                        segments={transcript}
+                        interimText={interimText}
+                        currentSpeakerName={currentSpeaker?.name}
+                    />
                 </div>
 
                 {/* Sidebar */}
