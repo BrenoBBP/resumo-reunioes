@@ -12,11 +12,12 @@ import {
     UserPlus,
     RefreshCw,
     Mic,
-    Edit3
+    Edit3,
+    UserCheck
 } from 'lucide-react';
 import Link from 'next/link';
 import { Button, Input, Chip, ChipGroup, Modal, Card, CardContent } from '@/components/ui';
-import { Timer, TranscriptArea, TempLinkSection } from '@/components/meeting';
+import { Timer, TranscriptArea, TempLinkSection, VoiceEnrollmentModal } from '@/components/meeting';
 import { useMeetingStore } from '@/stores/meeting-store';
 import { Person, TranscriptSegment } from '@/types';
 import {
@@ -28,6 +29,11 @@ import {
     isAssemblyAIAvailable
 } from '@/lib/transcription';
 import { mockPeople } from '@/lib/storage/mock-data';
+import {
+    VoiceProfile,
+    getVoiceProfiles,
+    clearVoiceProfiles,
+} from '@/lib/audio/voice-enrollment';
 
 // Speaker detected by AssemblyAI
 interface DetectedSpeaker {
@@ -64,10 +70,13 @@ export default function MeetingPage() {
     const [showSpeakerModal, setShowSpeakerModal] = useState(false);
     const [showAddParticipant, setShowAddParticipant] = useState(false);
     const [showSpeakerManagerModal, setShowSpeakerManagerModal] = useState(false);
+    const [showVoiceEnrollment, setShowVoiceEnrollment] = useState(false);
     const [newParticipantName, setNewParticipantName] = useState('');
     const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
     const [interimText, setInterimText] = useState('');
     const [usingAssemblyAI, setUsingAssemblyAI] = useState(false);
+    const [usingVoiceEnrollment, setUsingVoiceEnrollment] = useState(false);
+    const [enrolledProfiles, setEnrolledProfiles] = useState<VoiceProfile[]>([]);
     const [detectedSpeakers, setDetectedSpeakers] = useState<DetectedSpeaker[]>([]);
     const [activeSpeakerName, setActiveSpeakerName] = useState<string>('');
     const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
@@ -233,6 +242,20 @@ export default function MeetingPage() {
         setNewParticipantName('');
     };
 
+    // Handle voice enrollment completion
+    const handleEnrollmentComplete = (profiles: VoiceProfile[]) => {
+        setEnrolledProfiles(profiles);
+        setUsingVoiceEnrollment(profiles.length > 0);
+        console.log('[Meeting] Voice enrollment complete:', profiles.length, 'profiles');
+    };
+
+    // Open voice enrollment modal
+    const openVoiceEnrollment = () => {
+        if (meeting && meeting.participants.length > 0) {
+            setShowVoiceEnrollment(true);
+        }
+    };
+
     const meeting = currentMeeting || getMeetingById(meetingId);
     const availablePeople = people.length > 0 ? people : mockPeople;
 
@@ -348,21 +371,99 @@ export default function MeetingPage() {
 
                 {/* Sidebar */}
                 <aside className="w-80 p-4 space-y-4 hidden lg:block">
+                    {/* Voice Enrollment */}
+                    <Card hover={false}>
+                        <CardContent>
+                            <div className="flex items-center justify-between mb-3">
+                                <div className="flex items-center gap-2">
+                                    <UserCheck size={16} className="text-[var(--text-muted)]" />
+                                    <span className="text-sm text-[var(--text-muted)]">
+                                        Cadastro de Vozes
+                                    </span>
+                                </div>
+                                {usingVoiceEnrollment && (
+                                    <span className="text-xs px-2 py-0.5 rounded-full bg-[var(--success)]/20 text-[var(--success)]">
+                                        Ativo
+                                    </span>
+                                )}
+                            </div>
+                            {enrolledProfiles.length > 0 ? (
+                                <div className="space-y-2">
+                                    {enrolledProfiles.map((profile) => (
+                                        <div
+                                            key={profile.id}
+                                            className={`
+                                                flex items-center gap-2 p-2 rounded-[var(--radius-sm)]
+                                                ${activeSpeakerName === profile.name ? 'bg-[var(--success)]/10' : ''}
+                                            `}
+                                        >
+                                            <div className="w-6 h-6 rounded-full bg-[var(--success)] flex items-center justify-center">
+                                                <span className="text-white text-xs">
+                                                    {profile.name.charAt(0).toUpperCase()}
+                                                </span>
+                                            </div>
+                                            <span className="text-sm text-[var(--text)]">{profile.name}</span>
+                                            {activeSpeakerName === profile.name && (
+                                                <span className="text-xs text-[var(--success)] ml-auto">Falando</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={openVoiceEnrollment}
+                                        className="w-full mt-2"
+                                    >
+                                        <Mic size={14} />
+                                        Regravar Vozes
+                                    </Button>
+                                </div>
+                            ) : (
+                                <div className="text-center">
+                                    <p className="text-sm text-[var(--text-secondary)] mb-3">
+                                        Cadastre as vozes para identificação automática
+                                    </p>
+                                    <Button
+                                        variant="primary"
+                                        size="sm"
+                                        onClick={openVoiceEnrollment}
+                                        className="w-full"
+                                    >
+                                        <UserCheck size={16} />
+                                        Cadastrar Vozes
+                                    </Button>
+                                </div>
+                            )}
+                        </CardContent>
+                    </Card>
+
                     {/* Current Speaker / Active Speaker */}
                     <Card hover={false}>
                         <CardContent>
                             <div className="flex items-center justify-between mb-3">
                                 <span className="text-sm text-[var(--text-muted)]">
-                                    {usingAssemblyAI ? 'Falante Detectado' : 'Falando agora'}
+                                    {usingVoiceEnrollment ? 'Falante Identificado' : usingAssemblyAI ? 'Falante Detectado' : 'Falando agora'}
                                 </span>
-                                {!usingAssemblyAI && (
+                                {!usingAssemblyAI && !usingVoiceEnrollment && (
                                     <Button variant="ghost" size="sm" onClick={() => setShowSpeakerModal(true)}>
                                         <RefreshCw size={14} />
                                         Trocar
                                     </Button>
                                 )}
                             </div>
-                            {usingAssemblyAI ? (
+                            {usingVoiceEnrollment ? (
+                                <div className="flex items-center gap-3">
+                                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--success)] to-[var(--primary)] flex items-center justify-center">
+                                        <Mic className="text-white" size={20} />
+                                    </div>
+                                    <div>
+                                        <span className="font-medium text-[var(--text)]">
+                                            {activeSpeakerName || 'Aguardando fala...'}
+                                        </span>
+                                        <p className="text-xs text-[var(--text-muted)]">Identificação por voz</p>
+                                    </div>
+                                </div>
+                            ) : usingAssemblyAI ? (
                                 <div className="flex items-center gap-3">
                                     <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--success)] to-[var(--primary)] flex items-center justify-center">
                                         <Mic className="text-white" size={20} />
@@ -664,6 +765,14 @@ export default function MeetingPage() {
                     )}
                 </div>
             </Modal>
+
+            {/* Voice Enrollment Modal */}
+            <VoiceEnrollmentModal
+                isOpen={showVoiceEnrollment}
+                onClose={() => setShowVoiceEnrollment(false)}
+                participants={meeting?.participants || []}
+                onEnrollmentComplete={handleEnrollmentComplete}
+            />
         </div>
     );
 }
