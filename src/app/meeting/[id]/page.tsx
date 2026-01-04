@@ -133,17 +133,26 @@ export default function MeetingPage() {
 
     // Setup transcription callback for Web Speech API (fallback)
     const handleWebSpeechSegment = useCallback((segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => {
+        // Use voice-identified speaker if Voice Enrollment is active
+        const speakerName = usingVoiceEnrollment && activeSpeakerName
+            ? activeSpeakerName
+            : (currentSpeaker?.name || segment.speakerName);
+
+        const speakerId = usingVoiceEnrollment && activeSpeakerName
+            ? activeSpeakerName // Use name as ID for voice enrollment
+            : (currentSpeaker?.id || segment.speakerId);
+
         const fullSegment: TranscriptSegment = {
             ...segment,
             id: Math.random().toString(36).substring(2, 15),
-            speakerId: currentSpeaker?.id || segment.speakerId,
-            speakerName: currentSpeaker?.name || segment.speakerName,
+            speakerId: speakerId,
+            speakerName: speakerName,
             createdAt: new Date(),
         };
 
         setTranscript((prev) => [...prev, fullSegment]);
-        addTranscriptSegment(segment);
-    }, [currentSpeaker, addTranscriptSegment]);
+        addTranscriptSegment({ ...segment, speakerId, speakerName });
+    }, [currentSpeaker, addTranscriptSegment, usingVoiceEnrollment, activeSpeakerName]);
 
     // Handle interim text (real-time display while speaking)
     const handleInterimResult = useCallback((text: string) => {
