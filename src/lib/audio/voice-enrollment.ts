@@ -434,3 +434,197 @@ export function isEnrollmentInProgress(): boolean {
 export function getEnrolledCount(): number {
     return getVoiceProfiles().filter(p => p.enrolled).length;
 }
+
+// ============================================
+// REAL-TIME VOICE IDENTIFICATION
+// ============================================
+
+interface RealtimeAnalysisState {
+    isAnalyzing: boolean;
+    stream: MediaStream | null;
+    audioContext: AudioContext | null;
+    analyser: AnalyserNode | null;
+    scriptProcessor: ScriptProcessorNode | null;
+    intervalId: NodeJS.Timeout | null;
+    onSpeakerChange: ((speakerName: string) => void) | null;
+    currentSpeaker: string | null;
+    audioBuffer: Float32Array[];
+}
+
+let realtimeState: RealtimeAnalysisState = {
+    isAnalyzing: false,
+    stream: null,
+    audioContext: null,
+    analyser: null,
+    scriptProcessor: null,
+    intervalId: null,
+    onSpeakerChange: null,
+    currentSpeaker: null,
+    audioBuffer: [],
+};
+
+/**
+ * Start real-time voice identification
+ * Continuously analyzes microphone audio and matches against enrolled profiles
+ */
+export async function startRealtimeVoiceIdentification(
+    onSpeakerChange: (speakerName: string) => void
+): Promise<boolean> {
+    const enrolledProfiles = getVoiceProfiles().filter(p => p.enrolled && p.features);
+
+    if (enrolledProfiles.length === 0) {
+        console.log('[VoiceID] No enrolled profiles, skipping real-time identification');
+        return false;
+    }
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                sampleRate: 44100,
+                echoCancellation: true,
+                noiseSuppression: true,
+            },
+        });
+
+        const audioContext = new AudioContext({ sampleRate: 44100 });
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 4096;
+        source.connect(analyser);
+
+        // Use ScriptProcessor to capture audio data
+        const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+        source.connect(scriptProcessor);
+        scriptProcessor.connect(audioContext.destination);
+
+        realtimeState = {
+            isAnalyzing: true,
+            stream,
+            audioContext,
+            analyser,
+            scriptProcessor,
+            intervalId: null,
+            onSpeakerChange,
+            currentSpeaker: null,
+            audioBuffer: [],
+        };
+
+        let silenceCount = 0;
+        const SILENCE_THRESHOLD = 0.01;
+        const ANALYSIS_SAMPLES = 10; // Analyze after collecting 10 chunks
+
+        scriptProcessor.onaudioprocess = (event) => {
+            if (!realtimeState.isAnalyzing) return;
+
+            const inputData = event.inputBuffer.getChannelData(0);
+            const copy = new Float32Array(inputData);
+
+            // Check if there's actual audio (not silence)
+            const rms = calculateAverageEnergy(copy);
+
+            if (rms > SILENCE_THRESHOLD) {
+                silenceCount = 0;
+                realtimeState.audioBuffer.push(copy);
+
+                // When we have enough samples, analyze
+                if (realtimeState.audioBuffer.length >= ANALYSIS_SAMPLES) {
+                    const combinedLength = realtimeState.audioBuffer.reduce((sum, arr) => sum + arr.length, 0);
+                    const combined = new Float32Array(combinedLength);
+                    let offset = 0;
+                    for (const arr of realtimeState.audioBuffer) {
+                        combined.set(arr, offset);
+                        offset += arr.length;
+                    }
+
+                    // Extract features and match
+                    const features = extractFeaturesFromData(combined, audioContext.sampleRate);
+                    const matchedProfile = matchVoice(features);
+
+                    if (matchedProfile && matchedProfile.name !== realtimeState.currentSpeaker) {
+                        realtimeState.currentSpeaker = matchedProfile.name;
+                        console.log('[VoiceID] Speaker identified:', matchedProfile.name);
+                        onSpeakerChange(matchedProfile.name);
+                    }
+
+                    // Clear buffer but keep last few for continuity
+                    realtimeState.audioBuffer = realtimeState.audioBuffer.slice(-3);
+                }
+            } else {
+                silenceCount++;
+                if (silenceCount > 20) { // ~2 seconds of silence
+                    realtimeState.audioBuffer = [];
+                }
+            }
+        };
+
+        console.log('[VoiceID] Started real-time voice identification with', enrolledProfiles.length, 'profiles');
+        return true;
+    } catch (error) {
+        console.error('[VoiceID] Failed to start real-time identification:', error);
+        return false;
+    }
+}
+
+/**
+ * Extract features directly from audio data (for real-time analysis)
+ */
+function extractFeaturesFromData(data: Float32Array, sampleRate: number): VoiceFeatures {
+    const avgPitch = estimatePitch(data, sampleRate);
+    const pitchVariance = calculatePitchVariance(data, sampleRate);
+    const avgEnergy = calculateAverageEnergy(data);
+    const zeroCrossingRate = calculateZeroCrossingRate(data);
+    const spectralCentroid = calculateSpectralCentroid(data, sampleRate);
+
+    return {
+        avgPitch,
+        pitchVariance,
+        avgEnergy,
+        zeroCrossingRate,
+        spectralCentroid,
+        sampleDuration: data.length / sampleRate,
+    };
+}
+
+/**
+ * Stop real-time voice identification
+ */
+export function stopRealtimeVoiceIdentification(): void {
+    if (realtimeState.isAnalyzing) {
+        realtimeState.stream?.getTracks().forEach(track => track.stop());
+        realtimeState.scriptProcessor?.disconnect();
+        realtimeState.audioContext?.close();
+
+        if (realtimeState.intervalId) {
+            clearInterval(realtimeState.intervalId);
+        }
+
+        realtimeState = {
+            isAnalyzing: false,
+            stream: null,
+            audioContext: null,
+            analyser: null,
+            scriptProcessor: null,
+            intervalId: null,
+            onSpeakerChange: null,
+            currentSpeaker: null,
+            audioBuffer: [],
+        };
+
+        console.log('[VoiceID] Stopped real-time voice identification');
+    }
+}
+
+/**
+ * Get the current identified speaker
+ */
+export function getCurrentIdentifiedSpeaker(): string | null {
+    return realtimeState.currentSpeaker;
+}
+
+/**
+ * Check if real-time voice identification is active
+ */
+export function isRealtimeIdentificationActive(): boolean {
+    return realtimeState.isAnalyzing;
+}

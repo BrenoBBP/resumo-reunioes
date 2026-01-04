@@ -33,6 +33,8 @@ import {
     VoiceProfile,
     getVoiceProfiles,
     clearVoiceProfiles,
+    startRealtimeVoiceIdentification,
+    stopRealtimeVoiceIdentification,
 } from '@/lib/audio/voice-enrollment';
 
 // Speaker detected by AssemblyAI
@@ -216,6 +218,7 @@ export default function MeetingPage() {
     // Handle finish
     const handleFinish = () => {
         stopRecording();
+        stopRealtimeVoiceIdentification(); // Stop voice identification
         updateMeeting(meetingId, {
             transcript,
             status: 'completed',
@@ -243,10 +246,22 @@ export default function MeetingPage() {
     };
 
     // Handle voice enrollment completion
-    const handleEnrollmentComplete = (profiles: VoiceProfile[]) => {
+    const handleEnrollmentComplete = async (profiles: VoiceProfile[]) => {
         setEnrolledProfiles(profiles);
         setUsingVoiceEnrollment(profiles.length > 0);
         console.log('[Meeting] Voice enrollment complete:', profiles.length, 'profiles');
+
+        // Start real-time voice identification
+        if (profiles.length > 0) {
+            const started = await startRealtimeVoiceIdentification((speakerName) => {
+                setActiveSpeakerName(speakerName);
+                console.log('[Meeting] Voice identified:', speakerName);
+            });
+
+            if (started) {
+                console.log('[Meeting] Real-time voice identification started');
+            }
+        }
     };
 
     // Open voice enrollment modal
